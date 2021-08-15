@@ -10,11 +10,8 @@
 #include <chain.h>
 #include <chainparams.h>
 #include <coins.h>
-#include <consensus/params.h>
 #include <consensus/validation.h>
 #include <core_io.h>
-#include <deploymentinfo.h>
-#include <deploymentstatus.h>
 #include <hash.h>
 #include <index/blockfilterindex.h>
 #include <index/coinstatsindex.h>
@@ -36,12 +33,10 @@
 #include <txmempool.h>
 #include <undo.h>
 #include <util/strencodings.h>
-#include <util/string.h>
 #include <util/system.h>
 #include <util/translation.h>
 #include <validation.h>
 #include <validationinterface.h>
-#include <versionbits.h>
 #include <warnings.h>
 
 #include <stdint.h>
@@ -51,6 +46,7 @@
 #include <condition_variable>
 #include <memory>
 #include <mutex>
+#include <optional>
 
 struct CUpdatedBlock
 {
@@ -1121,13 +1117,13 @@ static RPCHelpMan gettxoutsetinfo()
                         {RPCResult::Type::STR_AMOUNT, "total_unspendable_amount", "The total amount of coins permanently excluded from the UTXO set (only available if coinstatsindex is used)"},
                         {RPCResult::Type::OBJ, "block_info", "Info on amounts in the block at this block height (only available if coinstatsindex is used)",
                         {
-                            {RPCResult::Type::STR_AMOUNT, "prevout_spent", "Total amount of all prevouts spent in this block"},
-                            {RPCResult::Type::STR_AMOUNT, "coinbase", "Coinbase subsidy amount of this block"},
-                            {RPCResult::Type::STR_AMOUNT, "new_outputs_ex_coinbase", "Total amount of new outputs created by this block"},
-                            {RPCResult::Type::STR_AMOUNT, "unspendable", "Total amount of unspendable outputs created in this block"},
+                            {RPCResult::Type::STR_AMOUNT, "prevout_spent", ""},
+                            {RPCResult::Type::STR_AMOUNT, "coinbase", ""},
+                            {RPCResult::Type::STR_AMOUNT, "new_outputs_ex_coinbase", ""},
+                            {RPCResult::Type::STR_AMOUNT, "unspendable", ""},
                             {RPCResult::Type::OBJ, "unspendables", "Detailed view of the unspendable categories",
                             {
-                                {RPCResult::Type::STR_AMOUNT, "genesis_block", "The unspendable amount of the Genesis block subsidy"},
+                                {RPCResult::Type::STR_AMOUNT, "genesis_block", ""},
                                 {RPCResult::Type::STR_AMOUNT, "bip30", "Transactions overridden by duplicates (no longer possible with BIP30)"},
                                 {RPCResult::Type::STR_AMOUNT, "scripts", "Amounts sent to scripts that are unspendable (for example OP_RETURN outputs)"},
                                 {RPCResult::Type::STR_AMOUNT, "unclaimed_rewards", "Fee rewards that miners did not claim in their coinbase transaction"},
@@ -1179,18 +1175,6 @@ static RPCHelpMan gettxoutsetinfo()
         pindex = ParseHashOrHeight(request.params[1], chainman);
     }
 
-    if (stats.index_requested && g_coin_stats_index) {
-        if (!g_coin_stats_index->BlockUntilSyncedToCurrentChain()) {
-            const IndexSummary summary{g_coin_stats_index->GetSummary()};
-
-            // If a specific block was requested and the index has already synced past that height, we can return the
-            // data already even though the index is not fully synced yet.
-            if (pindex->nHeight > summary.best_block_height) {
-                throw JSONRPCError(RPC_INTERNAL_ERROR, strprintf("Unable to get data because coinstatsindex is still syncing. Current height: %d", summary.best_block_height));
-            }
-        }
-    }
-
     if (GetUTXOStats(coins_view, *blockman, stats, node.rpc_interruption_point, pindex)) {
         ret.pushKV("height", (int64_t)stats.nHeight);
         ret.pushKV("bestblock", stats.hashBlock.GetHex());
@@ -1207,7 +1191,7 @@ static RPCHelpMan gettxoutsetinfo()
             ret.pushKV("transactions", static_cast<int64_t>(stats.nTransactions));
             ret.pushKV("disk_size", stats.nDiskSize);
         } else {
-            ret.pushKV("total_unspendable_amount", ValueFromAmount(stats.total_unspendable_amount));
+            ret.pushKV("total_unspendable_amount", ValueFromAmount(stats.block_unspendable_amount));
 
             CCoinsStats prev_stats{hash_type};
 
@@ -1216,21 +1200,28 @@ static RPCHelpMan gettxoutsetinfo()
             }
 
             UniValue block_info(UniValue::VOBJ);
-            block_info.pushKV("prevout_spent", ValueFromAmount(stats.total_prevout_spent_amount - prev_stats.total_prevout_spent_amount));
-            block_info.pushKV("coinbase", ValueFromAmount(stats.total_coinbase_amount - prev_stats.total_coinbase_amount));
-            block_info.pushKV("new_outputs_ex_coinbase", ValueFromAmount(stats.total_new_outputs_ex_coinbase_amount - prev_stats.total_new_outputs_ex_coinbase_amount));
-            block_info.pushKV("unspendable", ValueFromAmount(stats.total_unspendable_amount - prev_stats.total_unspendable_amount));
+            block_info.pushKV("prevout_spent", ValueFromAmount(stats.block_prevout_spent_amount - prev_stats.block_prevout_spent_amount));
+            block_info.pushKV("coinbase", ValueFromAmount(stats.block_coinbase_amount - prev_stats.block_coinbase_amount));
+            block_info.pushKV("new_outputs_ex_coinbase", ValueFromAmount(stats.block_new_outputs_ex_coinbase_amount - prev_stats.block_new_outputs_ex_coinbase_amount));
+            block_info.pushKV("unspendable", ValueFromAmount(stats.block_unspendable_amount - prev_stats.block_unspendable_amount));
 
             UniValue unspendables(UniValue::VOBJ);
-            unspendables.pushKV("genesis_block", ValueFromAmount(stats.total_unspendables_genesis_block - prev_stats.total_unspendables_genesis_block));
-            unspendables.pushKV("bip30", ValueFromAmount(stats.total_unspendables_bip30 - prev_stats.total_unspendables_bip30));
-            unspendables.pushKV("scripts", ValueFromAmount(stats.total_unspendables_scripts - prev_stats.total_unspendables_scripts));
-            unspendables.pushKV("unclaimed_rewards", ValueFromAmount(stats.total_unspendables_unclaimed_rewards - prev_stats.total_unspendables_unclaimed_rewards));
+            unspendables.pushKV("genesis_block", ValueFromAmount(stats.unspendables_genesis_block - prev_stats.unspendables_genesis_block));
+            unspendables.pushKV("bip30", ValueFromAmount(stats.unspendables_bip30 - prev_stats.unspendables_bip30));
+            unspendables.pushKV("scripts", ValueFromAmount(stats.unspendables_scripts - prev_stats.unspendables_scripts));
+            unspendables.pushKV("unclaimed_rewards", ValueFromAmount(stats.unspendables_unclaimed_rewards - prev_stats.unspendables_unclaimed_rewards));
             block_info.pushKV("unspendables", unspendables);
 
             ret.pushKV("block_info", block_info);
         }
     } else {
+        if (g_coin_stats_index) {
+            const IndexSummary summary{g_coin_stats_index->GetSummary()};
+
+            if (!summary.synced) {
+                throw JSONRPCError(RPC_INTERNAL_ERROR, strprintf("Unable to read UTXO set because coinstatsindex is still syncing. Current height: %d", summary.best_block_height));
+            }
+        }
         throw JSONRPCError(RPC_INTERNAL_ERROR, "Unable to read UTXO set");
     }
     return ret;
@@ -1329,7 +1320,7 @@ static RPCHelpMan verifychain()
                 "\nVerifies blockchain database.\n",
                 {
                     {"checklevel", RPCArg::Type::NUM, RPCArg::DefaultHint{strprintf("%d, range=0-4", DEFAULT_CHECKLEVEL)},
-                        strprintf("How thorough the block verification is:\n%s", MakeUnorderedList(CHECKLEVEL_DOC))},
+                        strprintf("How thorough the block verification is:\n - %s", Join(CHECKLEVEL_DOC, "\n- "))},
                     {"nblocks", RPCArg::Type::NUM, RPCArg::DefaultHint{strprintf("%d, 0=all", DEFAULT_CHECKBLOCKS)}, "The number of blocks to check."},
                 },
                 RPCResult{
@@ -1353,29 +1344,32 @@ static RPCHelpMan verifychain()
     };
 }
 
-static void SoftForkDescPushBack(const CBlockIndex* active_chain_tip, UniValue& softforks, const Consensus::Params& params, Consensus::BuriedDeployment dep)
+static void BuriedForkDescPushBack(UniValue& softforks, const std::string &name, int softfork_height, int tip_height) EXCLUSIVE_LOCKS_REQUIRED(cs_main)
 {
     // For buried deployments.
-
-    if (!DeploymentEnabled(params, dep)) return;
+    // A buried deployment is one where the height of the activation has been hardcoded into
+    // the client implementation long after the consensus change has activated. See BIP 90.
+    // Buried deployments with activation height value of
+    // std::numeric_limits<int>::max() are disabled and thus hidden.
+    if (softfork_height == std::numeric_limits<int>::max()) return;
 
     UniValue rv(UniValue::VOBJ);
     rv.pushKV("type", "buried");
     // getblockchaininfo reports the softfork as active from when the chain height is
     // one below the activation height
-    rv.pushKV("active", DeploymentActiveAfter(active_chain_tip, params, dep));
-    rv.pushKV("height", params.DeploymentHeight(dep));
-    softforks.pushKV(DeploymentName(dep), rv);
+    rv.pushKV("active", tip_height + 1 >= softfork_height);
+    rv.pushKV("height", softfork_height);
+    softforks.pushKV(name, rv);
 }
 
-static void SoftForkDescPushBack(const CBlockIndex* active_chain_tip, UniValue& softforks, const Consensus::Params& consensusParams, Consensus::DeploymentPos id)
+static void BIP9SoftForkDescPushBack(const CBlockIndex* active_chain_tip, UniValue& softforks, const std::string &name, const Consensus::Params& consensusParams, Consensus::DeploymentPos id) EXCLUSIVE_LOCKS_REQUIRED(cs_main)
 {
     // For BIP9 deployments.
-
-    if (!DeploymentEnabled(consensusParams, id)) return;
+    // Deployments that are never active are hidden.
+    if (consensusParams.vDeployments[id].nStartTime == Consensus::BIP9Deployment::NEVER_ACTIVE) return;
 
     UniValue bip9(UniValue::VOBJ);
-    const ThresholdState thresholdState = g_versionbitscache.State(active_chain_tip, consensusParams, id);
+    const ThresholdState thresholdState = VersionBitsState(active_chain_tip, consensusParams, id, versionbitscache);
     switch (thresholdState) {
     case ThresholdState::DEFINED: bip9.pushKV("status", "defined"); break;
     case ThresholdState::STARTED: bip9.pushKV("status", "started"); break;
@@ -1383,24 +1377,23 @@ static void SoftForkDescPushBack(const CBlockIndex* active_chain_tip, UniValue& 
     case ThresholdState::ACTIVE: bip9.pushKV("status", "active"); break;
     case ThresholdState::FAILED: bip9.pushKV("status", "failed"); break;
     }
-    const bool has_signal = (ThresholdState::STARTED == thresholdState || ThresholdState::LOCKED_IN == thresholdState);
-    if (has_signal) {
+    if (ThresholdState::STARTED == thresholdState)
+    {
         bip9.pushKV("bit", consensusParams.vDeployments[id].bit);
     }
     bip9.pushKV("start_time", consensusParams.vDeployments[id].nStartTime);
     bip9.pushKV("timeout", consensusParams.vDeployments[id].nTimeout);
-    int64_t since_height = g_versionbitscache.StateSinceHeight(active_chain_tip, consensusParams, id);
+    int64_t since_height = VersionBitsStateSinceHeight(active_chain_tip, consensusParams, id, versionbitscache);
     bip9.pushKV("since", since_height);
-    if (has_signal) {
+    if (ThresholdState::STARTED == thresholdState)
+    {
         UniValue statsUV(UniValue::VOBJ);
-        BIP9Stats statsStruct = g_versionbitscache.Statistics(active_chain_tip, consensusParams, id);
+        BIP9Stats statsStruct = VersionBitsStatistics(active_chain_tip, consensusParams, id);
         statsUV.pushKV("period", statsStruct.period);
+        statsUV.pushKV("threshold", statsStruct.threshold);
         statsUV.pushKV("elapsed", statsStruct.elapsed);
         statsUV.pushKV("count", statsStruct.count);
-        if (ThresholdState::LOCKED_IN != thresholdState) {
-            statsUV.pushKV("threshold", statsStruct.threshold);
-            statsUV.pushKV("possible", statsStruct.possible);
-        }
+        statsUV.pushKV("possible", statsStruct.possible);
         bip9.pushKV("statistics", statsUV);
     }
     bip9.pushKV("min_activation_height", consensusParams.vDeployments[id].min_activation_height);
@@ -1413,7 +1406,7 @@ static void SoftForkDescPushBack(const CBlockIndex* active_chain_tip, UniValue& 
     }
     rv.pushKV("active", ThresholdState::ACTIVE == thresholdState);
 
-    softforks.pushKV(DeploymentName(id), rv);
+    softforks.pushKV(name, rv);
 }
 
 RPCHelpMan getblockchaininfo()
@@ -1429,8 +1422,7 @@ RPCHelpMan getblockchaininfo()
                         {RPCResult::Type::NUM, "headers", "the current number of headers we have validated"},
                         {RPCResult::Type::STR, "bestblockhash", "the hash of the currently best block"},
                         {RPCResult::Type::NUM, "difficulty", "the current difficulty"},
-                        {RPCResult::Type::NUM_TIME, "time", "The block time expressed in " + UNIX_EPOCH_TIME},
-                        {RPCResult::Type::NUM_TIME, "mediantime", "The median block time expressed in " + UNIX_EPOCH_TIME},
+                        {RPCResult::Type::NUM, "mediantime", "median time for the current best block"},
                         {RPCResult::Type::NUM, "verificationprogress", "estimate of verification progress [0..1]"},
                         {RPCResult::Type::BOOL, "initialblockdownload", "(debug information) estimate of whether this node is in Initial Block Download mode"},
                         {RPCResult::Type::STR_HEX, "chainwork", "total amount of work in active chain, in hexadecimal"},
@@ -1447,18 +1439,18 @@ RPCHelpMan getblockchaininfo()
                                 {RPCResult::Type::OBJ, "bip9", "status of bip9 softforks (only for \"bip9\" type)",
                                 {
                                     {RPCResult::Type::STR, "status", "one of \"defined\", \"started\", \"locked_in\", \"active\", \"failed\""},
-                                    {RPCResult::Type::NUM, "bit", "the bit (0-28) in the block version field used to signal this softfork (only for \"started\" and \"locked_in\" status)"},
+                                    {RPCResult::Type::NUM, "bit", "the bit (0-28) in the block version field used to signal this softfork (only for \"started\" status)"},
                                     {RPCResult::Type::NUM_TIME, "start_time", "the minimum median time past of a block at which the bit gains its meaning"},
                                     {RPCResult::Type::NUM_TIME, "timeout", "the median time past of a block at which the deployment is considered failed if not yet locked in"},
                                     {RPCResult::Type::NUM, "since", "height of the first block to which the status applies"},
                                     {RPCResult::Type::NUM, "min_activation_height", "minimum height of blocks for which the rules may be enforced"},
-                                    {RPCResult::Type::OBJ, "statistics", "numeric statistics about signalling for a softfork (only for \"started\" and \"locked_in\" status)",
+                                    {RPCResult::Type::OBJ, "statistics", "numeric statistics about BIP9 signalling for a softfork (only for \"started\" status)",
                                     {
-                                        {RPCResult::Type::NUM, "period", "the length in blocks of the signalling period"},
-                                        {RPCResult::Type::NUM, "threshold", "the number of blocks with the version bit set required to activate the feature (only for \"started\" status)"},
+                                        {RPCResult::Type::NUM, "period", "the length in blocks of the BIP9 signalling period"},
+                                        {RPCResult::Type::NUM, "threshold", "the number of blocks with the version bit set required to activate the feature"},
                                         {RPCResult::Type::NUM, "elapsed", "the number of blocks elapsed since the beginning of the current period"},
                                         {RPCResult::Type::NUM, "count", "the number of blocks with the version bit set in the current period"},
-                                        {RPCResult::Type::BOOL, "possible", "returns false if there are not enough blocks left in this period to pass activation threshold (only for \"started\" status)"},
+                                        {RPCResult::Type::BOOL, "possible", "returns false if there are not enough blocks left in this period to pass activation threshold"},
                                     }},
                                 }},
                                 {RPCResult::Type::NUM, "height", "height of the first block which the rules are or will be enforced (only for \"buried\" type, or \"bip9\" type with \"active\" status)"},
@@ -1486,7 +1478,6 @@ RPCHelpMan getblockchaininfo()
     obj.pushKV("headers",               pindexBestHeader ? pindexBestHeader->nHeight : -1);
     obj.pushKV("bestblockhash",         tip->GetBlockHash().GetHex());
     obj.pushKV("difficulty",            (double)GetDifficulty(tip));
-    obj.pushKV("time",                  (int64_t)tip->nTime);
     obj.pushKV("mediantime",            (int64_t)tip->GetMedianTimePast());
     obj.pushKV("verificationprogress",  GuessVerificationProgress(Params().TxData(), tip));
     obj.pushKV("initialblockdownload",  active_chainstate.IsInitialBlockDownload());
@@ -1512,14 +1503,14 @@ RPCHelpMan getblockchaininfo()
 
     const Consensus::Params& consensusParams = Params().GetConsensus();
     UniValue softforks(UniValue::VOBJ);
-    SoftForkDescPushBack(tip, softforks, consensusParams, Consensus::DEPLOYMENT_HEIGHTINCB);
-    SoftForkDescPushBack(tip, softforks, consensusParams, Consensus::DEPLOYMENT_DERSIG);
-    SoftForkDescPushBack(tip, softforks, consensusParams, Consensus::DEPLOYMENT_CLTV);
-    SoftForkDescPushBack(tip, softforks, consensusParams, Consensus::DEPLOYMENT_CSV);
-    SoftForkDescPushBack(tip, softforks, consensusParams, Consensus::DEPLOYMENT_SEGWIT);
-    SoftForkDescPushBack(tip, softforks, consensusParams, Consensus::DEPLOYMENT_TESTDUMMY);
-    SoftForkDescPushBack(tip, softforks, consensusParams, Consensus::DEPLOYMENT_TAPROOT);
-    obj.pushKV("softforks", softforks);
+    BuriedForkDescPushBack(softforks, "bip34", consensusParams.BIP34Height, height);
+    BuriedForkDescPushBack(softforks, "bip66", consensusParams.BIP66Height, height);
+    BuriedForkDescPushBack(softforks, "bip65", consensusParams.BIP65Height, height);
+    BuriedForkDescPushBack(softforks, "csv", consensusParams.CSVHeight, height);
+    BuriedForkDescPushBack(softforks, "segwit", consensusParams.SegwitHeight, height);
+    BIP9SoftForkDescPushBack(tip, softforks, "testdummy", consensusParams, Consensus::DEPLOYMENT_TESTDUMMY);
+    BIP9SoftForkDescPushBack(tip, softforks, "taproot", consensusParams, Consensus::DEPLOYMENT_TAPROOT);
+    obj.pushKV("softforks",             softforks);
 
     obj.pushKV("warnings", GetWarnings(false).original);
     return obj;
@@ -1640,7 +1631,7 @@ static RPCHelpMan getchaintips()
     };
 }
 
-UniValue MempoolInfoToJSON(const CTxMemPool& pool)
+UniValue MempoolInfoToJSON(const CTxMemPool& pool, const std::optional<MempoolHistogramFeeRates> feeLimits)
 {
     // Make sure this call is atomic in the pool.
     LOCK(pool.cs);
@@ -1655,6 +1646,67 @@ UniValue MempoolInfoToJSON(const CTxMemPool& pool)
     ret.pushKV("mempoolminfee", ValueFromAmount(std::max(pool.GetMinFee(maxmempool), ::minRelayTxFee).GetFeePerK()));
     ret.pushKV("minrelaytxfee", ValueFromAmount(::minRelayTxFee.GetFeePerK()));
     ret.pushKV("unbroadcastcount", uint64_t{pool.GetUnbroadcastTxs().size()});
+
+    if (feeLimits) {
+        const MempoolHistogramFeeRates& limits{feeLimits.value()};
+
+        /* Keep histogram per...
+         * ... cumulated tx sizes
+         * ... txns (count)
+         * ... cumulated fees */
+        std::vector<uint64_t> sizes(limits.size(), 0);
+        std::vector<uint64_t> count(limits.size(), 0);
+        std::vector<CAmount> fees(limits.size(), 0);
+
+        for (const CTxMemPoolEntry& e : pool.mapTx) {
+            const CAmount fee{e.GetFee()}, afees{e.GetModFeesWithAncestors()}, dfees{e.GetModFeesWithDescendants()};
+            const uint32_t size{(uint32_t)e.GetTxSize()}, asize{(uint32_t)e.GetSizeWithAncestors()}, dsize{(uint32_t)e.GetSizeWithDescendants()};
+
+            const CAmount fpb{CFeeRate{fee, size}.GetFee(1)};     // Fee rate per byte
+            const CAmount afpb{CFeeRate{afees, asize}.GetFee(1)}; // Fee rate per byte including ancestors
+            const CAmount dfpb{CFeeRate{dfees, dsize}.GetFee(1)}; // Fee rate per byte including descendants
+
+            // Fee rate per byte including ancestors & descendants
+            const CAmount tfpb{CFeeRate{afees + dfees - fee, asize + dsize - size}.GetFee(1)};
+            const CAmount fee_rate_per_byte{std::max(std::min(dfpb, tfpb), std::min(fpb, afpb))};
+
+            // Distribute fee rates into fee limits
+            for (size_t i = limits.size(); i-- > 0; ) {
+                if (fee_rate_per_byte >= limits[i]) {
+                    sizes[i] += size;
+                    ++count[i];
+                    fees[i] += fee;
+                    break;
+                }
+            }
+        }
+
+        // Track total amount of available fees in fee rate groups
+        CAmount total_fees = 0;
+        UniValue groups(UniValue::VOBJ);
+        for (size_t i = 0; i < limits.size(); ++i) {
+            UniValue info_sub(UniValue::VOBJ);
+            info_sub.pushKV("size", sizes.at(i));
+            info_sub.pushKV("count", count.at(i));
+            info_sub.pushKV("fees", fees.at(i));
+            info_sub.pushKV("from", limits.at(i));
+
+            if (i == limits.size() - 1) {
+                info_sub.pushKV("to", NullUniValue);
+            } else {
+                info_sub.pushKV("to", limits[i + 1] - 1);
+            }
+
+            total_fees += fees.at(i);
+            groups.pushKV(ToString(limits.at(i)), info_sub);
+        }
+
+        UniValue info(UniValue::VOBJ);
+        info.pushKV("fee_rate_groups", groups);
+        info.pushKV("total_fees", total_fees);
+        ret.pushKV("fee_histogram", info);
+    }
+
     return ret;
 }
 
@@ -1662,7 +1714,13 @@ static RPCHelpMan getmempoolinfo()
 {
     return RPCHelpMan{"getmempoolinfo",
                 "\nReturns details on the active state of the TX memory pool.\n",
-                {},
+                {
+                    {"fee_histogram", RPCArg::Type::ARR, RPCArg::Optional::OMITTED_NAMED_ARG, "Fee statistics grouped by fee rate ranges",
+                        {
+                            {"fee_rate", RPCArg::Type::NUM, RPCArg::Optional::NO, "Fee rate (in " + CURRENCY_ATOM + "/vB) to group the fees by"},
+                        },
+                    },
+                },
                 RPCResult{
                     RPCResult::Type::OBJ, "", "",
                     {
@@ -1670,19 +1728,59 @@ static RPCHelpMan getmempoolinfo()
                         {RPCResult::Type::NUM, "size", "Current tx count"},
                         {RPCResult::Type::NUM, "bytes", "Sum of all virtual transaction sizes as defined in BIP 141. Differs from actual serialized size because witness data is discounted"},
                         {RPCResult::Type::NUM, "usage", "Total memory usage for the mempool"},
-                        {RPCResult::Type::STR_AMOUNT, "total_fee", "Total fees for the mempool in " + CURRENCY_UNIT + ", ignoring modified fees through prioritizetransaction"},
+                        {RPCResult::Type::STR_AMOUNT, "total_fee", "Total fees for the mempool in " + CURRENCY_UNIT + "/kvB, ignoring modified fees through prioritizetransaction"},
                         {RPCResult::Type::NUM, "maxmempool", "Maximum memory usage for the mempool"},
                         {RPCResult::Type::STR_AMOUNT, "mempoolminfee", "Minimum fee rate in " + CURRENCY_UNIT + "/kvB for tx to be accepted. Is the maximum of minrelaytxfee and minimum mempool fee"},
                         {RPCResult::Type::STR_AMOUNT, "minrelaytxfee", "Current minimum relay fee for transactions"},
-                        {RPCResult::Type::NUM, "unbroadcastcount", "Current number of transactions that haven't passed initial broadcast yet"}
+                        {RPCResult::Type::NUM, "unbroadcastcount", "Current number of transactions that haven't passed initial broadcast yet"},
+                        {RPCResult::Type::OBJ, "fee_histogram", "",
+                            {
+                                {RPCResult::Type::OBJ_DYN, "fee_rate_groups", "",
+                                {
+                                    {RPCResult::Type::OBJ, "<fee_rate_group>", "Fee rate group named by its lower bound (in " + CURRENCY_ATOM + "/vB), identical to the \"from\" field below",
+                                    {
+                                        {RPCResult::Type::NUM, "size", "Cumulative size of all transactions in the fee rate group"},
+                                        {RPCResult::Type::NUM, "count", "Number of transactions in the fee rate group"},
+                                        {RPCResult::Type::NUM, "fees", "Cumulative fees of all transactions in the fee rate group (in " + CURRENCY_ATOM + "/vB)"},
+                                        {RPCResult::Type::NUM, "from", "Group contains transactions with fee rates equal or greater than this value (in " + CURRENCY_ATOM + "/vB)"},
+                                        {RPCResult::Type::NUM, "to", "Group contains transactions with fee rates equal or less than this value (in " + CURRENCY_ATOM + "/vB)"},
+                                    }}}},
+                                {RPCResult::Type::NUM, "total_fees", "Total available fees in mempool (in " + CURRENCY_ATOM + "/vB)"},
+                            }},
                     }},
                 RPCExamples{
-                    HelpExampleCli("getmempoolinfo", "")
-            + HelpExampleRpc("getmempoolinfo", "")
+                    HelpExampleCli("getmempoolinfo", "") +
+                    HelpExampleCli("getmempoolinfo", R"("[0, 1, 2, 3, 4, 5, 6, 7, 8, 10, 12, 14, 17, 20, 25, 30, 40, 50, 60, 70, 80, 100, 120, 140, 170, 200]")") +
+                    HelpExampleRpc("getmempoolinfo", "") +
+                    HelpExampleRpc("getmempoolinfo", R"([0, 1, 2, 3, 4, 5, 6, 7, 8, 10, 12, 14, 17, 20, 25, 30, 40, 50, 60, 70, 80, 100, 120, 140, 170, 200])")
                 },
         [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
 {
-    return MempoolInfoToJSON(EnsureAnyMemPool(request.context));
+    MempoolHistogramFeeRates feelimits;
+    std::optional<MempoolHistogramFeeRates> feelimits_opt = std::nullopt;
+
+    if (!request.params[0].isNull()) {
+        const UniValue feelimits_univalue = request.params[0].get_array();
+
+        if (feelimits_univalue.size() == 0 || feelimits_univalue.size() > 30) {
+            throw JSONRPCError(RPC_INVALID_PARAMETER, "Invalid number of parameters");
+        }
+
+        for (size_t i = 0; i < feelimits_univalue.size(); ++i) {
+            int64_t value = feelimits_univalue[i].get_int64();
+
+            if (value < 0) {
+                throw JSONRPCError(RPC_INVALID_PARAMETER, "Non-negative values are expected");
+            } else if (i > 0 && feelimits.back() >= value) {
+                throw JSONRPCError(RPC_INVALID_PARAMETER, "Strictly increasing values are expected");
+            }
+
+            feelimits.push_back(value);
+        }
+        feelimits_opt = std::optional<MempoolHistogramFeeRates>(feelimits);
+    }
+
+    return MempoolInfoToJSON(EnsureAnyMemPool(request.context), feelimits_opt);
 },
     };
 }
@@ -1716,7 +1814,7 @@ static RPCHelpMan preciousblock()
     }
 
     BlockValidationState state;
-    chainman.ActiveChainstate().PreciousBlock(state, pblockindex);
+    chainman.ActiveChainstate().PreciousBlock(state, Params(), pblockindex);
 
     if (!state.IsValid()) {
         throw JSONRPCError(RPC_DATABASE_ERROR, state.ToString());
@@ -1753,10 +1851,10 @@ static RPCHelpMan invalidateblock()
             throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Block not found");
         }
     }
-    chainman.ActiveChainstate().InvalidateBlock(state, pblockindex);
+    chainman.ActiveChainstate().InvalidateBlock(state, Params(), pblockindex);
 
     if (state.IsValid()) {
-        chainman.ActiveChainstate().ActivateBestChain(state);
+        chainman.ActiveChainstate().ActivateBestChain(state, Params());
     }
 
     if (!state.IsValid()) {
@@ -1797,7 +1895,7 @@ static RPCHelpMan reconsiderblock()
     }
 
     BlockValidationState state;
-    chainman.ActiveChainstate().ActivateBestChain(state);
+    chainman.ActiveChainstate().ActivateBestChain(state, Params());
 
     if (!state.IsValid()) {
         throw JSONRPCError(RPC_DATABASE_ERROR, state.ToString());
@@ -2268,7 +2366,6 @@ public:
         if (g_scan_in_progress.exchange(true)) {
             return false;
         }
-        CHECK_NONFATAL(g_scan_progress == 0);
         m_could_reserve = true;
         return true;
     }
@@ -2276,7 +2373,6 @@ public:
     ~CoinsViewScanReserver() {
         if (m_could_reserve) {
             g_scan_in_progress = false;
-            g_scan_progress = 0;
         }
     }
 };
@@ -2393,6 +2489,7 @@ static RPCHelpMan scantxoutset()
         std::vector<CTxOut> input_txos;
         std::map<COutPoint, Coin> coins;
         g_should_abort_scan = false;
+        g_scan_progress = 0;
         int64_t count = 0;
         std::unique_ptr<CCoinsViewCursor> pcursor;
         CBlockIndex* tip;
@@ -2402,7 +2499,7 @@ static RPCHelpMan scantxoutset()
             LOCK(cs_main);
             CChainState& active_chainstate = chainman.ActiveChainstate();
             active_chainstate.ForceFlushStateToDisk();
-            pcursor = active_chainstate.CoinsDB().Cursor();
+            pcursor = std::unique_ptr<CCoinsViewCursor>(active_chainstate.CoinsDB().Cursor());
             CHECK_NONFATAL(pcursor);
             tip = active_chainstate.m_chain.Tip();
             CHECK_NONFATAL(tip);
@@ -2601,7 +2698,7 @@ UniValue CreateUTXOSnapshot(NodeContext& node, CChainState& chainstate, CAutoFil
             throw JSONRPCError(RPC_INTERNAL_ERROR, "Unable to read UTXO set");
         }
 
-        pcursor = chainstate.CoinsDB().Cursor();
+        pcursor = std::unique_ptr<CCoinsViewCursor>(chainstate.CoinsDB().Cursor());
         tip = chainstate.m_blockman.LookupBlockIndex(stats.hashBlock);
         CHECK_NONFATAL(tip);
     }
