@@ -12,7 +12,10 @@ class CTransaction;
 static const uint32_t MAX_BIP125_RBF_SEQUENCE = 0xfffffffd;
 
 // Check whether the sequence numbers on this transaction are signaling
-// opt-in to replace-by-fee, according to BIP 125
+// opt-in to replace-by-fee, according to BIP 125.
+// rbf signaling is inherited, and while child transactions may not explicitly
+// signal RBF (like this function checks for), they will inherit rbf
+// replaceability if any of their unconfirmed parents are signaling opt-in to rbf.
 bool SignalsOptInRBF(const CTransaction &tx);
 
 #endif // BITCOIN_UTIL_RBF_H
