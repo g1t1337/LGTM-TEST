@@ -546,7 +546,9 @@ public:
     }
     RBFTransactionState isRBFOptIn(const CTransaction& tx) override
     {
-        if (!m_node.mempool) return IsRBFOptInEmptyMempool(tx);
+        // We need to check the mempool to ensure that all potential replaced transactions
+        // (`tx` and descendants of `tx`) is <= `MAX_BIP125_REPLACEMENT_CANDIDATES`.
+        if (!m_node.mempool) return RBFTransactionState::UNKNOWN;
         LOCK(m_node.mempool->cs);
         return IsRBFOptIn(tx, *m_node.mempool);
     }
