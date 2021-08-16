@@ -5,6 +5,7 @@
 #include <policy/rbf.h>
 #include <primitives/transaction.h>
 #include <sync.h>
+#include <util/rbf.h>
 #include <test/fuzz/FuzzedDataProvider.h>
 #include <test/fuzz/fuzz.h>
 #include <test/fuzz/util.h>
@@ -43,6 +44,12 @@ FUZZ_TARGET(rbf)
     }
     {
         LOCK(pool.cs);
-        (void)IsRBFOptIn(tx, pool);
+        const RBFTransactionState state = IsRBFOptIn(tx, pool);
+        if (state == RBFTransactionState::UNKNOWN) {
+          assert(!pool.exists(tx.GetHash()));
+        }
+        if (pool.exists(tx.GetHash())) {
+          assert(state != RBFTransactionState::UNKNOWN);
+        }
     }
 }
